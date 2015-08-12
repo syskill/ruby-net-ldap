@@ -224,6 +224,8 @@ class Net::LDAP::Connection #:nodoc:
         bind_sasl(auth)
       elsif meth == :gss_spnego
         bind_gss_spnego(auth)
+      elsif meth == :gssapi
+        bind_gssapi(auth)
       else
         raise Net::LDAP::AuthMethodUnsupportedError, "Unsupported auth method (#{meth})"
       end
@@ -340,6 +342,50 @@ class Net::LDAP::Connection #:nodoc:
               :challenge_response => nego)
   end
   private :bind_gss_spnego
+
+  #--
+  # Like #bind_gss_spnego, this is PROVISIONAL, only for testing, DON'T USE
+  # THIS YET. Uses Dan Wanek's GSSAPI FFI wrapper.
+  #
+  # This authentication method is accessed by calling #bind with a :method
+  # parameter of :gss_spnego. It requires a :hostname attribute, and uses an
+  # optional :servicename attribute which defaults to "ldap". It performs
+  # GSSAPI authentication (which almost always means Kerberos authentication)
+  # with the server.
+  #++
+  def bind_gssapi(auth)
+    require 'gssapi'
+
+    host, svc = [auth[:hostname], auth[:servicename] || "ldap"]
+    raise Net::LDAP::BindingInformationInvalidError, "Invalid binding information" unless (host && svc)
+
+    gsscli = GSSAPI::Simple.new(host, svc)
+    context_established = nil
+    challenge_response = proc { |challenge|
+      if !context_established
+        resp = gsscli.init_context(challenge)
+        raise "Failed to establish GSSAPI security context" unless resp
+        context_established = true if resp.equal?(true)
+        resp
+      else
+        # After the security context has been established, the LDAP server will
+        # offer to negotiate the security strength factor (SSF) and maximum
+        # output size. We request an SSF of 0, i.e. no protection (integrity
+        # and confidentiality protections aren't implemented here, yet) and no
+        # size limit.
+        #
+        # N.b. your LDAP server may reject the bind request with an error
+        # message like "protocol violation: client requested invalid layer."
+        # That means that it is configured to require stronger protection.
+        gsscli.wrap_message("\x01\xff\xff\xff".force_encoding("binary"), false)
+      end
+    }
+
+    bind_sasl(:method => :sasl, :mechanism => "GSSAPI",
+              :initial_credential => gsscli.init_context,
+              :challenge_response => challenge_response)
+  end
+  private :bind_gssapi
 
 
   #--
